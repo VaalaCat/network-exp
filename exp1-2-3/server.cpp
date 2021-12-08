@@ -1,58 +1,194 @@
-// Server.c
-#include <stdio.h>
-#include <sys/socket.h>
-#include <string.h>
-#include <stdlib.h>
+// server.c
 #include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
+#include <sys/types.h>
 #include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/select.h>
+#include <string.h>
+#include <strings.h>
 
-#define LISTENQ 1024
-#define SERV_PORT 9999
-#define BUFSIZE 0x1000
+#define SERVER_PORT 4560
+#define MAXLINE 1024 //接收缓冲区长度
+#define LISTENQ 1024 //监听队列长度
 
-void echo(int client)
+int recvn(int s, char *buf, unsigned int fixedlen)
 {
-	ssize_t n;
-	char buf[BUFSIZE];
-	while ((n = read(client, buf, BUFSIZE)) > 0)
-		write(client, buf, n);
+	int n;	 //存储单次recv操作的返回值
+	int cnt; //用于统计相对于固定长度，剩余多少字节尚未接收
+	cnt = fixedlen;
+	while (cnt > 0)
+	{
+		n = recv(s, buf, cnt, 0);
+		if (n < 0)
+		{
+			printf("[ERROR] Recv Error\n");
+			return -1;
+		}
+		if (n == 0)
+		{
+			printf("[INFO] Loss Connect.\n");
+			return fixedlen - cnt;
+		}
+		buf += n;
+		cnt -= n;
+	}
+	return fixedlen;
 }
 
-int main(int argc, char **argv)
+int recvvl(int s, char *buf, unsigned int bufLen)
 {
-	int client, server;
-	struct sockaddr_in cliaddr, servaddr;
-	socklen_t clilen;
+	int n;			  //存储单次recv操作的返回值
+	unsigned int Len; //用于存储报文头部存储的长度信息,获取接收报文长度信息
 
-	bzero(&servaddr, sizeof(servaddr));
-	servaddr.sin_family = AF_INET;
-	servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
-	servaddr.sin_port = htons(SERV_PORT);
+	n = recvn(s, (char *)&Len, sizeof(unsigned int));
+	if (n != sizeof(unsigned int))
+	{
+		printf("[ERROR]Recv Error\n");
+		return -1;
+	}
 
-	server = socket(AF_INET, SOCK_STREAM, 0);
-	if (server == -1)
-		puts("[ERROR]socket");
-	if (bind(server, (struct sockaddr *)&servaddr, sizeof(servaddr)) == -1)
-		puts("[ERROR]bind");
-	if (listen(server, LISTENQ) == -1)
-		puts("[ERROR]listen");
+	Len = ntohl(Len);
+	if (Len > bufLen)
+	{
+		//如果没有足够的空间存储变长消息，返回错误
+		while (Len > 0)
+		{
+			n = recvn(s, buf, bufLen);
+			if (n != bufLen)
+			{
+				if (n == -1)
+				{
+					printf("[ERROR] Recv Error\n");
+					return -1;
+				}
+				else
+				{
+					printf("[INFO] Loss Connect.\n");
+					return 0;
+				}
+			}
+			Len -= bufLen;
+			if (Len < bufLen)
+				bufLen = Len;
+		}
+		printf("[ERROR]Message Too Long\n");
+		return -1;
+	}
+
+	n = recvn(s, buf, Len);
+	if (n != Len)
+	{
+		if (n == -1)
+		{
+			printf("[ERROR] Recv Error\n");
+			return -1;
+		}
+		else
+		{
+			printf("[INFO] Loss Connect.\n");
+			return 0;
+		}
+	}
+	return n;
+}
+
+void echo(int s)
+{
+	int recvlen = 0;
+	char recvBuf[MAXLINE]; //接收缓存
+	char sendBuf[MAXLINE]; //发送缓存
+	unsigned int Len = 0;  //发送数据长度
+	unsigned int bufLen = MAXLINE;
+	while (1)
+	{
+		memset(recvBuf, 0, MAXLINE);
+		memset(sendBuf, 0, MAXLINE);
+		recvlen = recvvl(s, recvBuf, bufLen);
+		if (recvlen == -1)
+		{
+			printf("[ERROR] Recv Error.\n");
+			close(s);
+			return;
+		}
+		sprintf(sendBuf, "Echo: %s", recvBuf);
+		printf("%s\n", sendBuf);
+
+		Len = (unsigned int)strlen(sendBuf);
+		Len = htonl(Len);
+		recvlen = send(s, (char *)&Len, sizeof(unsigned int), 0);
+		if (recvlen == -1)
+		{
+			printf("[ERROR] Send Len Error.\n");
+			close(s);
+			return;
+		}
+		recvlen = send(s, sendBuf, strlen(sendBuf), 0);
+		if (recvlen == -1)
+		{
+			printf("[ERROR] Send Buf Error.\n");
+			close(s);
+			return;
+		}
+	}
+}
+
+int main()
+{
+	int sock_server, sock_client;  //服务器监听套接字和连接套接字
+	socklen_t iClilen = 0;		   //连接客户端数
+	sockaddr_in Cliaddr, Servaddr; //通信地址
+
+	sock_server = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (-1 == sock_server)
+	{
+		printf("[ERROR] Socket Failed!\n");
+		return -1;
+	}
+
+	memset(&Servaddr, 0, sizeof(Servaddr));
+	memset(&Cliaddr, 0, sizeof(Cliaddr));
+
+	//服务器监听套接字地址
+	Servaddr.sin_family = AF_INET;
+	Servaddr.sin_port = htons(SERVER_PORT);
+	Servaddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+	if (bind(sock_server, (struct sockaddr *)&Servaddr, sizeof(Servaddr)) < 0)
+	{
+		printf("[ERROR] Bind Error.\n");
+		close(sock_server);
+		return -1;
+	}
+
+	if (listen(sock_server, LISTENQ) < 0)
+	{
+		printf("[EEROR] Listen Error.\n");
+		close(sock_server);
+		return -1;
+	}
 
 	while (1)
 	{
-		clilen = sizeof(cliaddr);
-		client = accept(server, (struct sockaddr *)&cliaddr, &clilen);
-		if (client == -1)
-			puts("[ERROR]accept");
+		iClilen = sizeof(Cliaddr);
+		sock_client = accept(sock_server, (struct sockaddr *)&Cliaddr, &iClilen);
+		if (sock_client < 0)
+		{
+			printf("[ERROR]Connect Error.\n");
+		}
 		pid_t child = fork();
 		if (!child)
 		{
-			echo(client);
-			close(client);
-			close(server);
+			printf("New Connect : %d\n", sock_client);
+			echo(sock_client);
+			close(sock_server);
+			close(sock_client);
 			return 0;
 		}
-		close(client);
 	}
+
+	close(sock_server);
+	return 0;
 }
