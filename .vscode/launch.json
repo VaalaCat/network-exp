@@ -6,7 +6,7 @@
 	"configurations": [
 		{
 			"name": "(lldb) 启动",
-			"type": "cppdbg",
+			"type": "lldb",
 			"request": "launch",
 			"program": "${fileDirname}/${fileBasenameNoExtension}",
 			"args": [],
